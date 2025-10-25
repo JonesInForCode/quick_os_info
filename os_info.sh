@@ -442,6 +442,64 @@ _run_and_log "Network neighbors" "ip neigh"
 _run_and_log "Network services" "netstat -tuln 2>/dev/null || ss -tuln"
 _run_and_log "Open ports" "ss -tuln | awk '{print \$5}' | grep -Eo '[0-9]+$' | sort -n | uniq"
 
+# -----------------------
+# PERMISSION & SECURITY CHECKS (added)
+# -----------------------
+
+# /root directory ownership and permissions
+_run_and_log "Root Directory Permissions" \
+"stat -c '%n %U %G %a %A' /root 2>/dev/null || echo '/root: stat failed or not present'"
+
+# Warn if current user is in group that owns /root and /root is group searchable
+_run_and_log "Root Directory Group Access Check" \
+"owner=\$(stat -c %U /root 2>/dev/null); group=\$(stat -c %G /root 2>/dev/null); mode=\$(stat -c %a /root 2>/dev/null); \
+echo \"/root owner=\$owner group=\$group mode=\$mode\"; \
+if [ -n \"\$group\" ] && id -nG 2>/dev/null | grep -qw \"\$group\"; then \
+  printf '%s\n' '⚠️  User is in group owning /root'; \
+fi"
+
+# Check global file permission
+_run_and_log "World-writable directories (non-tmp)" \
+"find / -xdev -type d -perm -0002 2>/dev/null | grep -vE '^/(proc|sys|dev|run|tmp)'"
+
+# Check sudoers visibility
+_run_and_log "Sudoers includes" "grep -E '^#includedir|#include' /etc/sudoers 2>/dev/null || echo 'No includes found'"
+
+# Check file capability
+_run_and_log "Files with capabilities (getcap -r /)" \
+"command -v getcap >/dev/null 2>&1 && getcap -r / 2>/dev/null || echo 'getcap not available'"
+
+# Check UID 0
+_run_and_log "Extra UID 0 accounts" "awk -F: '\$3 == 0 {print \$1}' /etc/passwd | grep -v '^root$' || echo 'No extra UID 0 users'"
+
+# Search readable files under /root that belong to root but group/world readable
+_run_and_log "Readable Files under /root (potential leaks)" \
+"find /root -maxdepth 2 -type f -printf '%M %u %g %p\n' 2>/dev/null | awk '\$2==\"root\" && (\$1 ~ /^-..r/ || \$1 ~ /^-.....r/){print \$0}'"
+
+# Find private keys readable by group/other
+_run_and_log "Readable Private SSH Keys" \
+"find / -xdev -type f \\( -name 'id_rsa' -o -name 'id_dsa' -o -name 'id_ecdsa' -o -name 'id_ed25519' \\) -perm /go=r 2>/dev/null | while read f; do ls -l \"\$f\"; done"
+
+# Check permissions of any .ssh directories
+_run_and_log "SSH Directory Permission Audit" \
+"for d in /root /home/*; do [ -d \"\$d/.ssh\" ] && echo \"Checking \$d/.ssh\" && ls -ld \"\$d/.ssh\" \"\$d/.ssh\"/* 2>/dev/null; done"
+
+# SSH daemon configuration summary
+_run_and_log "SSHD Config Key Lines" \
+"grep -E '^(Port|PermitRootLogin|ListenAddress)' /etc/ssh/sshd_config 2>/dev/null || echo 'sshd_config not readable'"
+
+# Listening ports (unprivileged)
+_run_and_log "Listening TCP Ports" \
+"ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null || echo 'No ss/netstat available'"
+
+# Probe common ports for SSH banners
+_run_and_log "SSH Banner Probe (localhost common ports)" \
+"for p in 22 80 2222 443; do echo -n \"Port \$p: \"; timeout 1 bash -c 'echo | nc -w 1 localhost '\$p' 2>/dev/null' | head -n1; done"
+
+# Show current user and groups (for context)
+_run_and_log "Current User Group Memberships" "id -un; id -nG"
+
+
 ## --- END ADDED COMMANDS --- ##
 
 if [ "$MINIMAL" -ne 1 ]; then
