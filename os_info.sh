@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # os_info.sh
 # POSIX-compatible system info collector — safe hostname fallbacks (no dummy values).
 #
@@ -393,6 +393,56 @@ _try_or_record "ip" "Networking: ip addr show" "ip a s" "ifconfig -a || printf '
 _try_or_record "iproute" "Networking: ip route" "ip r" "route -n || netstat -rn || printf '%s\n' 'no route/netstat available'"
 
 _try_or_record "uptime" "System Uptime" "uptime" "awk '{printf(\"uptime_seconds=%s idle=%s\\n\", \$1, \$2)}' /proc/uptime || cat /proc/uptime"
+
+## --- Added Commands --- ##
+_run_and_log "Available shells" "cat /etc/shells"
+_run_and_log "Users and their groups" "getent passwd | cut -d: -f1 | xargs -n1 groups"
+_run_and_log "Superusers" "awk -F: '\$3 == 0 {print \$1}' /etc/passwd"
+_run_and_log "Console users" "who"
+_run_and_log "Logged users" "w"
+_run_and_log "Password policy" "cat /etc/login.defs | grep -E 'PASS_MAX_DAYS|PASS_MIN_DAYS|PASS_WARN_AGE'"
+_run_and_log "PGP keys" "find \$HOME -type f -name '*.asc' -o -name '*.gpg' 2>/dev/null"
+_run_and_log "Clipboard check" "command -v xclip >/dev/null 2>&1 && xclip -o || echo 'xclip not available'"
+
+_run_and_log "Sudo and suid binaries" "find / -perm -4000 -type f 2>/dev/null | grep -E 'sudo|su'"
+_run_and_log "NOPASSWD sudo entries" "grep -r 'NOPASSWD' /etc/sudoers* 2>/dev/null"
+_run_and_log "setenv via sudo" "sudo -l | grep -i setenv"
+_run_and_log "Bashenv preserved via sudo" "sudo -l | grep -i env_keep"
+_run_and_log "Sudo less" "sudo -l | grep -i less"
+_run_and_log "Commands runnable as non-root" "sudo -l | grep -v 'not allowed'"
+_run_and_log "Security modules (AppArmor, Grsecurity, PaX, Execshield, SELinux, ASLR)" "lsmod | grep -Ei 'apparmor|grsecurity|pax|execshield|selinux' || dmesg | grep -Ei 'apparmor|grsecurity|pax|execshield|selinux' || echo 'No security modules detected'; echo 'ASLR:'; cat /proc/sys/kernel/randomize_va_space"
+
+_run_and_log "Mounted drives" "mount | column -t"
+_run_and_log "Unmounted drives" "lsblk -o NAME,MOUNTPOINT | grep -v '/mnt\\|/media'"
+_run_and_log "Installed packages" "command -v dpkg >/dev/null 2>&1 && dpkg -l || command -v rpm >/dev/null 2>&1 && rpm -qa || echo 'No package manager detected'"
+_run_and_log "Running services" "systemctl list-units --type=service --state=running 2>/dev/null || service --status-all 2>/dev/null"
+_run_and_log "Writeable .service files" "find /etc/systemd/system /lib/systemd/system -type f -name '*.service' -writable 2>/dev/null"
+_run_and_log "Writeable service binaries" "find /usr/lib/systemd /lib/systemd -type f -writable 2>/dev/null"
+_run_and_log "Can write to systemd path" "[ -w /etc/systemd/system ] && echo 'Writable' || echo 'Not writable'"
+
+_run_and_log "Timers" "systemctl list-timers --all 2>/dev/null"
+_run_and_log "Writeable timers" "find /etc/systemd/system /lib/systemd/system -type f -name '*.timer' -writable 2>/dev/null"
+_run_and_log "CRON visibility" "crontab -l 2>/dev/null || echo 'No crontab for current user'"
+_run_and_log "Writeable CRON dirs" "find /etc/cron* -type f -writable 2>/dev/null"
+
+_run_and_log "Sockets" "systemctl list-sockets 2>/dev/null"
+_run_and_log ".socket writable" "find /etc/systemd/system /lib/systemd/system -type f -name '*.socket' -writable 2>/dev/null"
+_run_and_log "Unix sockets" "find / -type s 2>/dev/null"
+_run_and_log "HTTP sockets" "ss -ltnp | grep ':80\\|:443'"
+_run_and_log "Docker sockets" "find /var/run -type s -name 'docker.sock' 2>/dev/null"
+
+_run_and_log "Containerd" "ps aux | grep containerd | grep -v grep"
+_run_and_log "RunC" "ps aux | grep runc | grep -v grep"
+_run_and_log "D-Bus" "ps aux | grep dbus | grep -v grep"
+
+_run_and_log "Network hosts" "cat /etc/hosts"
+_run_and_log "DNS config" "cat /etc/resolv.conf"
+_run_and_log "Network interfaces" "ip link show"
+_run_and_log "Network neighbors" "ip neigh"
+_run_and_log "Network services" "netstat -tuln 2>/dev/null || ss -tuln"
+_run_and_log "Open ports" "ss -tuln | awk '{print \$5}' | grep -Eo '[0-9]+$' | sort -n | uniq"
+
+## --- END ADDED COMMANDS --- ##
 
 if [ "$MINIMAL" -ne 1 ]; then
   if command -v ps >/dev/null 2>&1; then _run_and_log "Running Processes (ps aux)" "ps aux"; else _run_and_log "Running Processes (ps fallback)" "ps -ef || printf '%s\n' 'ps not available'"; fi
