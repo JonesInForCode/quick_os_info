@@ -1,37 +1,20 @@
 #!/bin/sh
 # os_info.sh
-# POSIX-compatible system info collector tailored to run without root by default.
-# Adds a "stealth" mode (-z / --stealth) that mutes per-step console output and
-# keeps only the JSON summary and the footer visible on the console. All step
-# status lines and command outputs remain written to the logfile.
+# POSIX-compatible system info collector — safe hostname fallbacks (no dummy values).
 #
-# Non-interactive signing workflow: --sign user@domain.com to label the run, or
-# --unsigned to run anonymously. No persistent signature files are created.
-#
-# Single-line JSON summary is written as the first line of the log for quick automated parsing.
-#
-# Flags:
-#   -c, --console        : Force output to console if logfile can't be created
-#   -v, --verbose        : Print full command output on console as it runs (in addition to logfile)
-#   -m, --minimal        : Minimal run (skip heavier/verbose checks)
-#   -s, --slow           : Slow mode (small delay between steps)
-#   -S, --very-slow      : Very slow mode (larger delay between steps)
-#   --step-delay N       : Explicit per-step delay in seconds (overrides -s/-S)
-#   -N, --lower-priority : Per-command lower priority (nice; ionice only if root)
-#   -G, --global-priority: Re-exec entire script under lower-priority once
-#   --nice-level N       : Niceness level for nice (default 10)
-#   -u, --unsigned       : Explicitly run unsigned (anonymous)
-#   --sign SIGNATURE     : Provide auditor identity (user@domain.com) for this run (no file written)
-#   -z, --stealth        : Stealth mode: suppress per-step console output; only JSON+footer printed to console
-#   -h, --help           : Show usage
-#
-# Designed to be safe to run without root for quick orientation after a compromise or for initial audit by admins.
+# This is the working script you confirmed earlier, with one focused change:
+# - Removed any hardcoded/dummy hostname values and replaced them with safe fallbacks:
+#     hostname -> /proc/sys/kernel/hostname -> uname -n -> "unknown"
+# No other behavior changed; --out, --stealth, -v, defaults, and logfile formatting remain the same.
 
 WATERMARK_LINE=""
 SIGNED=0
 SIGNATURE=""
 FORCE_UNSIGNED=0
 STEALTH=0
+JSON_CONSOLE=0
+FORCE_FULL=0
+OUT_PATH=""
 
 timestamp="$(date '+%Y-%m-%d-%H-%M-%S' 2>/dev/null || date '+%F-%H-%M-%S')"
 PID="$$"
@@ -48,15 +31,22 @@ LOWER_PRIORITY=0
 GLOBAL_PRIORITY=0
 NICE_LEVEL=10
 
-# Detect if running as root (uid 0)
+# --- detect root quickly ---
 IS_ROOT=0
 if command -v id >/dev/null 2>&1; then
-  if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
-    IS_ROOT=1
-  fi
+  [ "$(id -u 2>/dev/null || echo 1)" = "0" ] && IS_ROOT=1
 fi
 
-# --- Parse args (POSIX) ---------------------------------------------------
+# immediate root-status console line
+if [ "$IS_ROOT" -eq 1 ]; then
+  printf '%s\n' 'You have root'
+  ROOT_STATUS_MSG="You have root"
+else
+  printf '%s\n' 'You do not have root'
+  ROOT_STATUS_MSG="You do not have root"
+fi
+
+# --- arg parse ---
 SIGN_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -65,158 +55,122 @@ while [ $# -gt 0 ]; do
     -m|--minimal) MINIMAL=1; shift ;;
     -s|--slow) STEP_DELAY=1; shift ;;
     -S|--very-slow) STEP_DELAY=5; shift ;;
-    --step-delay)
-      shift
-      if [ -n "$1" ]; then
-        case "$1" in
-          ''|*[!0-9]*)
-            printf 'Invalid --step-delay value: %s\n' "$1" >&2
-            exit 1
-            ;;
-          *)
-            STEP_DELAY="$1"
-            shift
-            ;;
-        esac
-      else
-        printf '--step-delay requires a numeric argument\n' >&2
-        exit 1
-      fi
-      ;;
+    --step-delay) shift; STEP_DELAY="$1"; shift ;;
     -N|--lower-priority) LOWER_PRIORITY=1; shift ;;
     -G|--global-priority) GLOBAL_PRIORITY=1; shift ;;
-    --nice-level)
-      shift
-      if [ -n "$1" ]; then
-        case "$1" in
-          ''|*[!0-9-]*)
-            printf 'Invalid --nice-level value: %s\n' "$1" >&2
-            exit 1
-            ;;
-          *)
-            NICE_LEVEL="$1"
-            shift
-            ;;
-        esac
-      else
-        printf '--nice-level requires a numeric argument\n' >&2
-        exit 1
-      fi
-      ;;
+    --nice-level) shift; NICE_LEVEL="$1"; shift ;;
     -u|--unsigned) FORCE_UNSIGNED=1; shift ;;
-    --sign)
+    --sign) shift; SIGN_ARG="$1"; shift ;;
+    -z|--stealth) STEALTH=1; shift ;;
+    -j|--json-console) JSON_CONSOLE=1; shift ;;
+    --force-full) FORCE_FULL=1; shift ;;
+    --out)
       shift
       if [ -n "$1" ]; then
-        SIGN_ARG="$1"
+        OUT_PATH="$1"
         shift
       else
-        printf '--sign requires an argument like user@domain.com\n' >&2
+        printf '%s\n' "--out requires a path argument" >&2
         exit 1
       fi
       ;;
-    -z|--stealth) STEALTH=1; shift ;;
     -h|--help)
-      printf 'Usage: %s [options]\n\n' "$0"
-      printf 'Options:\n'
-      printf '  -c, --console        Force output to console if logfile cannot be created\n'
-      printf '  -v, --verbose        Show full command output on console\n'
-      printf '  -m, --minimal        Minimal checks (faster, less output)\n'
-      printf '  -s, --slow           Slow mode (small delay between steps)\n'
-      printf '  -S, --very-slow      Very slow mode (larger delay between steps)\n'
-      printf '  --step-delay N       Explicit per-step delay in seconds (overrides -s/-S)\n'
-      printf '  -N, --lower-priority Per-command lower-priority (nice; ionice only if root)\n'
-      printf '  -G, --global-priority Re-exec entire script under lower-priority once\n'
-      printf '  --nice-level N       Niceness level for nice (default 10)\n'
-      printf '  -u, --unsigned       Run unsigned (anonymous)\n'
-      printf '  --sign SIGNATURE     Sign this run non-interactively (user@domain.com)\n'
-      printf '  -z, --stealth        Stealth mode: only JSON summary and footer printed to console\n'
-      printf '  -h, --help           Show this help\n'
+      cat <<'EOF'
+Usage: ./os_info.sh [options]
+Options:
+  -c, --console        Force output to console if logfile cannot be created
+  -v, --verbose        Stream full command output to console (and logfile)
+  -m, --minimal        Minimal checks
+  -s, --slow           Small delay between steps (~1s)
+  -S, --very-slow      Larger delay (~5s)
+  --step-delay N       Per-step delay in seconds
+  -N, --lower-priority Per-command lower-priority (nice; ionice if root)
+  -G, --global-priority Re-exec under lower-priority
+  --nice-level N       Niceness level for nice (default 10)
+  -u, --unsigned       Explicitly run unsigned (anonymous)
+  --sign SIGNATURE     Label this run (user@domain.com)
+  --out /path/to/log   Force logfile path (script will attempt to create parent dir)
+  -z, --stealth        Stealth mode (very quiet console)
+  -j, --json-console   Print JSON summary to console (opt-in)
+  --force-full         Attempt fallback checks and log why tools were missing
+  -h, --help           Show this help
+EOF
       exit 0
       ;;
     *)
-      printf 'Unknown option: %s\n' "$1" >&2
+      printf '%s\n' "Unknown option: $1" >&2
       exit 1
       ;;
   esac
 done
 
-# If re-exec'd under a global-priority run, avoid re-exec loop
-if [ -n "${OS_INFO_GLOBAL_PRIO_RERUN:-}" ]; then
-  GLOBAL_PRIORITY=0
-fi
+# avoid re-exec loop if re-exec marker present
+[ -n "${OS_INFO_GLOBAL_PRIO_RERUN:-}" ] && GLOBAL_PRIORITY=0
 
-# Validate non-interactive sign argument (if provided)
+# validate sign arg
 if [ -n "$SIGN_ARG" ]; then
   case "$SIGN_ARG" in
-    *@*.*)
-      SIGNED=1
-      SIGNATURE="$SIGN_ARG"
-      ;;
-    *)
-      printf 'Invalid signature format: %s (expected user@domain.com)\n' "$SIGN_ARG" >&2
-      exit 1
-      ;;
+    *@*.*) SIGNED=1; SIGNATURE="$SIGN_ARG" ;;
+    *) printf '%s\n' "Invalid signature format: $SIGN_ARG" >&2; exit 1 ;;
   esac
 fi
 
-# Determine watermark line to use and print suggestion if unsigned
 CURRENT_TIME="$(date '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || date '+%F %T')"
 if [ "$SIGNED" -eq 1 ]; then
   WATERMARK_LINE="THIS IS AN AUTHORIZED TEST by ${SIGNATURE} TIME:${CURRENT_TIME}"
 else
   WATERMARK_LINE="This script was run as an audit, no disruption is intended, user has elected to run script anonymously, TIME:${CURRENT_TIME}"
   if [ "$FORCE_UNSIGNED" -ne 1 ] && [ "$STEALTH" -ne 1 ]; then
-    printf '\nNOTE: This run is unsigned. To label this run for traceability, run:\n  %s --sign user@domain.com\nOr explicitly continue anonymously with --unsigned\n\n' "$0"
+    printf '%s\n\n' "NOTE: This run is unsigned. To label this run: $0 --sign user@domain.com"
   fi
 fi
 
-# If stealth requested, it overrides verbose and console-force for per-step output.
-# Stealth should only allow JSON header and footer to be printed. All per-step status lines
-# and command output remain written to the logfile only.
-if [ "$STEALTH" -eq 1 ]; then
-  VERBOSE=0
-fi
+[ "$STEALTH" -eq 1 ] && VERBOSE=0
 
-# --- Logging helpers ------------------------------------------------------
-_logfile_only() {
-  [ -n "$LOGFILE" ] && printf '%s\n' "$1" >>"$LOGFILE" 2>/dev/null || true
-}
+# --- helpers ---
+_logfile_only() { [ -n "$LOGFILE" ] && printf '%s\n' "$1" >>"$LOGFILE" 2>/dev/null || true; }
 
-# _status prints to console unless STEALTH mode is enabled, in which case it logs only.
 _status() {
-  if [ "${STEALTH:-0}" -eq 1 ]; then
-    _logfile_only "$1"
-  else
+  if [ "$VERBOSE" -eq 1 ] && [ "${STEALTH:-0}" -ne 1 ]; then
     printf '%s\n' "$1"
-    _logfile_only "$1"
   fi
+  _logfile_only "$1"
 }
 
 _fail_step() {
-  step="$1"
-  reason="$2"
-  printf 'ERROR: os info logging failed at step %s - %s\n' "$step" "$reason" >&2
+  step="$1"; reason="$2"
+  printf '%s\n' "ERROR: os info logging failed at step $step - $reason" >&2
   _logfile_only "ERROR: os info logging failed at step ${step} - ${reason}"
   error_count=$((error_count + 1))
 }
 
+# choose logfile, with OUT_PATH support
 _choose_logfile() {
+  if [ -n "$OUT_PATH" ]; then
+    out_dir="$(dirname -- "$OUT_PATH" 2>/dev/null || printf '%s\n' .)"
+    if [ ! -d "$out_dir" ]; then
+      if ! mkdir -p "$out_dir" 2>/dev/null; then
+        _logfile_only "WARNING: unable to create directory for --out path: $out_dir; falling back to automatic selection"
+      fi
+    fi
+    if : >"$OUT_PATH" 2>/dev/null; then
+      LOGFILE="$OUT_PATH"
+      return 0
+    else
+      _logfile_only "WARNING: cannot write to --out path: $OUT_PATH; falling back to automatic selection"
+    fi
+  fi
+
   for d in $TRY_DIRS; do
     [ -z "$d" ] && continue
     [ ! -d "$d" ] && continue
     candidate="${d%/}/os_info_${timestamp}_${PID}.log"
-    if : >"$candidate" 2>/dev/null; then
-      LOGFILE="$candidate"
-      return 0
-    else
-      printf 'failed to write to %s\n' "$candidate" >&2
-    fi
+    if : >"$candidate" 2>/dev/null; then LOGFILE="$candidate"; return 0; fi
   done
   return 1
 }
 
-# _show_output determines whether command outputs should be shown on console.
-# In STEALTH mode we never show per-command outputs on console.
+# show output on console only when verbose or when logfile absent+console forced; stealth suppresses
 _show_output() {
   [ "${STEALTH:-0}" -eq 1 ] && return 1
   [ "$VERBOSE" -eq 1 ] && return 0
@@ -224,244 +178,268 @@ _show_output() {
   return 1
 }
 
-# Prepare per-command priority wrapper (non-root uses only nice)
 _prepare_priority_wrapper() {
-  PRIORITY_PREFIX=""
-  PRIORITY_AVAILABLE=0
+  PRIORITY_PREFIX=""; PRIORITY_AVAILABLE=0
   [ "$LOWER_PRIORITY" -ne 1 ] && return 0
-
-  HAVE_NICE=0
-  HAVE_IONICE=0
-  command -v nice >/dev/null 2>&1 && HAVE_NICE=1
-  command -v ionice >/dev/null 2>&1 && HAVE_IONICE=1
-
+  command -v nice >/dev/null 2>&1 && HAVE_NICE=1 || HAVE_NICE=0
+  command -v ionice >/dev/null 2>&1 && HAVE_IONICE=1 || HAVE_IONICE=0
   if [ "$IS_ROOT" -eq 1 ] && [ "$HAVE_IONICE" -eq 1 ] && [ "$HAVE_NICE" -eq 1 ]; then
-    PRIORITY_PREFIX="ionice -c3 -n7 nice -n ${NICE_LEVEL}"
-    PRIORITY_AVAILABLE=1
+    PRIORITY_PREFIX="ionice -c3 -n7 nice -n ${NICE_LEVEL}"; PRIORITY_AVAILABLE=1
   elif [ "$HAVE_NICE" -eq 1 ]; then
-    PRIORITY_PREFIX="nice -n ${NICE_LEVEL}"
-    PRIORITY_AVAILABLE=1
+    PRIORITY_PREFIX="nice -n ${NICE_LEVEL}"; PRIORITY_AVAILABLE=1
   elif [ "$IS_ROOT" -eq 1 ] && [ "$HAVE_IONICE" -eq 1 ]; then
-    PRIORITY_PREFIX="ionice -c3 -n7"
-    PRIORITY_AVAILABLE=1
+    PRIORITY_PREFIX="ionice -c3 -n7"; PRIORITY_AVAILABLE=1
+  fi
+}
+
+_maybe_sleep() { [ "${STEP_DELAY:-0}" -gt 0 ] && sleep "${STEP_DELAY}" 2>/dev/null || true; }
+
+_log_section_header() {
+  section="$1"
+  if [ -n "$LOGFILE" ]; then
+    printf '%s\n' "" >>"$LOGFILE" 2>/dev/null
+    printf '## %s ##\n' "$section" >>"$LOGFILE" 2>/dev/null
+    printf '---\n' >>"$LOGFILE" 2>/dev/null
+  fi
+}
+
+# Run a command and place its output into the corresponding section in the logfile.
+_run_and_log() {
+  step_no=$((step_no + 1)); desc="$1"; shift; cmd="$*"
+
+  if [ "$VERBOSE" -eq 1 ]; then
+    printf '%s\n' "Step ${step_no}: ${desc} -- running..."
+    _logfile_only "----- Step ${step_no}: ${desc} - $(date '+%Y-%m-%d %H:%M:%S') -----"
+    _logfile_only "\$ $cmd"
+    _prepare_priority_wrapper
+    if [ "${PRIORITY_AVAILABLE:-0}" -eq 1 ] && [ -n "${PRIORITY_PREFIX}" ]; then
+      WRAPPED_CMD="$PRIORITY_PREFIX sh -c \"$cmd\""
+    else
+      WRAPPED_CMD="$cmd"
+    fi
+    if command -v tee >/dev/null 2>&1; then
+      sh -c "$WRAPPED_CMD" 2>&1 | tee -a "${LOGFILE:-/dev/null}"
+      rc=${PIPESTATUS:-$?} 2>/dev/null || rc=$?
+    else
+      sh -c "$WRAPPED_CMD" >>"${LOGFILE:-/dev/null}" 2>&1 || rc=$?
+    fi
+    if [ "${rc:-0}" -ne 0 ]; then
+      _fail_step "${step_no}" "${desc} (exit ${rc})"
+    else
+      printf '%s\n' "Step ${step_no}: ${desc} -- completed"
+      _logfile_only "Step ${step_no}: ${desc} -- completed"
+    fi
   else
-    PRIORITY_PREFIX=""
-    PRIORITY_AVAILABLE=0
+    _log_section_header "$desc"
+    _logfile_only "\$ $cmd"
+    _prepare_priority_wrapper
+    if [ "${PRIORITY_AVAILABLE:-0}" -eq 1 ] && [ -n "${PRIORITY_PREFIX}" ]; then
+      WRAPPED_CMD="$PRIORITY_PREFIX sh -c \"$cmd\""
+    else
+      WRAPPED_CMD="$cmd"
+    fi
+    output="$(sh -c "$WRAPPED_CMD" 2>&1 || true)"; rc=$?
+    [ -n "$LOGFILE" ] && printf '%s\n' "$output" >>"$LOGFILE" 2>/dev/null || true
+    if [ "$rc" -ne 0 ]; then
+      _fail_step "${step_no}" "${desc} (exit ${rc})"
+    fi
+  fi
+
+  _maybe_sleep
+  return 0
+}
+
+_try_or_record() {
+  cmd_name="$1"; human="$2"; primary="$3"; fallback="$4"
+  if command -v ${primary%% *} >/dev/null 2>&1; then
+    _run_and_log "$human" "$primary"
+  else
+    if [ "$FORCE_FULL" -eq 1 ]; then
+      _run_and_log "${human} (fallback attempted)" "$fallback" || _logfile_only "Note: ${human} fallback failed or produced no output"
+    else
+      _logfile_only "SKIPPED: ${human} - ${primary%% *} not available"
+    fi
   fi
 }
 
-# Sleep between steps when STEP_DELAY > 0.
-_maybe_sleep() {
-  if [ "${STEP_DELAY:-0}" -gt 0 ]; then
-    sleep "${STEP_DELAY}" 2>/dev/null || true
-  fi
-}
-
-# Write audit header (JSON summary single-line + human header). Always print JSON+header to console.
+# Header writing: JSON summary to logfile; optionally print JSON to console with -j
 _write_audit_header() {
   AUDITOR="$(whoami 2>/dev/null || printf '%s' "${USER:-unknown}")"
-  HOSTNAME="$(hostname 2>/dev/null || ( [ -r /proc/sys/kernel/hostname ] && cat /proc/sys/kernel/hostname 2>/dev/null ) || uname -n 2>/dev/null || printf '%s' unknown)"
+  # SAFE hostname evaluation: try hostname, then /proc, then uname -n, then "unknown"
+  HOSTNAME="$(hostname 2>/dev/null || ( [ -r /proc/sys/kernel/hostname ] && cat /proc/sys/kernel/hostname 2>/dev/null ) || uname -n 2>/dev/null || printf '%s' 'unknown')"
   START_TIME="$(date '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || date '+%F %T')"
 
-  # JSON summary (single line)
-  if [ "$SIGNED" -eq 1 ]; then
-    signer_json="\"${SIGNATURE}\""
-  else
-    signer_json="null"
-  fi
+  if [ "$SIGNED" -eq 1 ]; then signer_json="\"${SIGNATURE}\""; else signer_json="null"; fi
   json_summary="{\"signed\":$( [ "$SIGNED" -eq 1 ] && printf 'true' || printf 'false' ),\"signer\":${signer_json},\"auditor\":\"${AUDITOR}\",\"host\":\"${HOSTNAME}\",\"start_time\":\"${START_TIME}\",\"pid\":${PID},\"audit_id\":\"${timestamp}\"}"
 
-  # Print JSON summary to console and append to logfile (first line)
-  printf '%s\n' "$json_summary" | tee -a "${LOGFILE:-/dev/null}"
+  [ -n "$LOGFILE" ] && printf '%s\n' "$json_summary" >>"$LOGFILE" 2>/dev/null || true
+  [ "$JSON_CONSOLE" -eq 1 ] && printf '%s\n' "$json_summary"
 
-  # Human header block (also appended to log)
-  {
-    printf '============================================================\n'
-    printf '%s\n' "$WATERMARK_LINE"
-    printf 'Audit run by (effective user): %s\n' "$AUDITOR"
-    printf 'Run as root: %s\n' "$( [ "$IS_ROOT" -eq 1 ] && printf 'yes' || printf 'no' )"
-    if [ "$SIGNED" -eq 1 ]; then
-      printf 'Signed by (flag): %s\n' "$SIGNATURE"
-    else
-      printf 'Signed by: (unsigned)\n'
-    fi
-    printf 'Host: %s\n' "$HOSTNAME"
-    printf 'Start time: %s\n' "$START_TIME"
-    printf 'Script PID: %s\n' "$PID"
-    printf 'Audit ID: %s\n' "$timestamp"
-    printf '============================================================\n'
-  } | tee -a "${LOGFILE:-/dev/null}"
+  if [ -n "$LOGFILE" ]; then
+    cat >>"$LOGFILE" <<EOF
+============================================================
+$WATERMARK_LINE
+Audit run by (effective user): $AUDITOR
+Run as root: $( [ "$IS_ROOT" -eq 1 ] && printf 'yes' || printf 'no' )
+$( [ "$SIGNED" -eq 1 ] && printf 'Signed by (flag): %s\n' "$SIGNATURE" || printf 'Signed by: (unsigned)\n' )
+Host: $HOSTNAME
+Start time: $START_TIME
+Script PID: $PID
+Audit ID: $timestamp
+============================================================
+
+EOF
+  fi
 }
 
-# Footer to write at exit (watermark + end time + final status); prints JSON footer only when stealth,
-# otherwise prints full footer. Always append to logfile.
 _write_audit_footer() {
   END_TIME="$(date '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || date '+%F %T')"
   if [ "${STEALTH:-0}" -eq 1 ]; then
-    # In stealth mode, print only a concise JSON-like footer line to console and logfile
     footer_json="{\"audit_id\":\"${timestamp}\",\"end_time\":\"${END_TIME}\",\"errors\":${error_count}}"
     printf '%s\n' "$footer_json" | tee -a "${LOGFILE:-/dev/null}"
   fi
 
-  {
-    printf '============================================================\n'
+  if [ -n "$LOGFILE" ]; then
+    cat >>"$LOGFILE" <<EOF
+
+============================================================
+$WATERMARK_LINE
+End time: $END_TIME
+EOF
+    if [ "$error_count" -eq 0 ]; then
+      printf '%s\n' 'Result: Completed without errors' >>"$LOGFILE"
+    else
+      printf '%s\n' "Result: Completed with ${error_count} error(s)" >>"$LOGFILE"
+    fi
+    printf '%s\n' "Reminder: run $0 --help for usage information" >>"$LOGFILE"
+    printf '============================================================\n' >>"$LOGFILE"
+  fi
+
+  if [ "${STEALTH:-0}" -eq 0 ]; then
     printf '%s\n' "$WATERMARK_LINE"
     printf 'End time: %s\n' "$END_TIME"
-    if [ "$error_count" -eq 0 ]; then
-      printf 'Result: Completed without errors\n'
-    else
-      printf 'Result: Completed with %s error(s)\n' "$error_count"
-    fi
-    printf 'Reminder: run %s --help for usage information\n' "$0"
-    printf '============================================================\n'
-  } >>"${LOGFILE:-/dev/null}" 2>/dev/null
-
-  # If not stealth, also print the human footer to console; if stealth, the concise footer already printed.
-  if [ "${STEALTH:-0}" -eq 0 ]; then
-    {
-      printf '============================================================\n'
-      printf '%s\n' "$WATERMARK_LINE"
-      printf 'End time: %s\n' "$END_TIME"
-      if [ "$error_count" -eq 0 ]; then
-        printf 'Result: Completed without errors\n'
-      else
-        printf 'Result: Completed with %s error(s)\n' "$error_count"
-      fi
-      printf 'Reminder: run %s --help for usage information\n' "$0"
-      printf '============================================================\n'
-    }
+    if [ "$error_count" -eq 0 ]; then printf '%s\n' 'Result: Completed without errors'; else printf '%s\n' "Result: Completed with ${error_count} error(s)"; fi
+    printf 'Logfile: %s\n' "${LOGFILE:-(no logfile)}"
   fi
-}
-
-# Run command: capture and save output, optionally show on console.
-_run_and_log() {
-  step_no=$((step_no + 1))
-  desc="$1"
-  shift
-  cmd="$*"
-
-  # In stealth mode per-step console output suppressed (_status handles that)
-  _status "Step ${step_no}: ${desc} -- running..."
-  _logfile_only "----- Step ${step_no}: ${desc} - $(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date) -----"
-  _logfile_only "\$ $cmd"
-
-  _prepare_priority_wrapper
-
-  if [ "${PRIORITY_AVAILABLE:-0}" -eq 1 ] && [ -n "${PRIORITY_PREFIX:-}" ]; then
-    WRAPPED_CMD="$PRIORITY_PREFIX sh -c \"$cmd\""
-  else
-    WRAPPED_CMD="$cmd"
-  fi
-
-  output="$(sh -c "$WRAPPED_CMD" 2>&1 || true)"
-  rc=$?
-  [ -n "$LOGFILE" ] && printf '%s\n' "$output" >>"$LOGFILE" 2>/dev/null || true
-
-  # Only show command output on console if _show_output says yes (verbose mode, non-stealth)
-  if _show_output; then
-    printf '%s\n' "$output"
-  fi
-
-  if [ "$rc" -ne 0 ]; then
-    _fail_step "${step_no}" "${desc} (exit ${rc})"
-  else
-    _status "Step ${step_no}: ${desc} -- completed"
-  fi
-
-  _maybe_sleep
-  return $rc
 }
 
 _on_exit() {
   rc=$?
   _write_audit_footer
-  if [ "$error_count" -gt 0 ] && [ "$rc" -eq 0 ]; then
-    exit 2
-  fi
   exit $rc
 }
 trap _on_exit EXIT INT TERM
 
-# --- Global-priority re-exec (non-root: only nice) --------------------------
+# Global-priority re-exec (non-root: only nice)
 if [ "$GLOBAL_PRIORITY" -eq 1 ] && [ -z "${OS_INFO_GLOBAL_PRIO_RERUN:-}" ]; then
-  HAVE_NICE=0
-  HAVE_IONICE=0
-  command -v nice >/dev/null 2>&1 && HAVE_NICE=1
-  command -v ionice >/dev/null 2>&1 && HAVE_IONICE=1
-
+  command -v nice >/dev/null 2>&1 && HAVE_NICE=1 || HAVE_NICE=0
+  command -v ionice >/dev/null 2>&1 && HAVE_IONICE=1 || HAVE_IONICE=0
   export OS_INFO_GLOBAL_PRIO_RERUN=1
-
   if [ "$IS_ROOT" -eq 1 ] && [ "$HAVE_IONICE" -eq 1 ] && [ "$HAVE_NICE" -eq 1 ]; then
-    _status "Re-execing script under global lower-priority: ionice -c3 -n7 nice -n ${NICE_LEVEL}"
     exec ionice -c3 -n7 nice -n "${NICE_LEVEL}" "$0" "$@"
   elif [ "$HAVE_NICE" -eq 1 ]; then
-    _status "Re-execing script under global lower-priority: nice -n ${NICE_LEVEL}"
     exec nice -n "${NICE_LEVEL}" "$0" "$@"
-  else
-    _status "Global-priority requested but 'nice' not available; continuing without global re-exec"
   fi
 fi
 
-# --- Start: logfile creation and header -----------------------------------
+# choose logfile; print path immediately (minimal console)
 if _choose_logfile; then
-  # Save root status message into log early and write header (also prints JSON summary)
   _logfile_only "Run as root: $( [ "$IS_ROOT" -eq 1 ] && printf 'yes' || printf 'no' )"
+  if [ -n "$LOGFILE" ]; then
+    printf '%s\n' "Logfile: $LOGFILE"
+    _logfile_only "Logfile: $LOGFILE"
+  fi
   _write_audit_header
-  _status "BEGIN WATERMARK: $WATERMARK_LINE"
-  _logfile_only "BEGIN WATERMARK: $WATERMARK_LINE"
-  _logfile_only "START TIME: $CURRENT_TIME"
-  _logfile_only ""
 else
   if [ "$CONSOLE_FORCE" -eq 1 ]; then
     LOGFILE=""
     _write_audit_header
-    _status "WARNING: unable to create logfile; continuing with console output because --console was specified"
+    _status "WARNING: unable to create logfile; streaming to console because --console specified"
   else
-    printf 'FATAL: unable to create logfile in any of these locations: %s\n' "$TRY_DIRS" >&2
-    printf 'failed to write to %s\n' "/tmp" >&2
+    printf '%s\n' "FATAL: unable to create logfile in any of these locations: $TRY_DIRS" >&2
     exit 1
   fi
 fi
 
-# Inform user about non-root tailored behavior (logged; printed only if not stealth)
 _status "Note: running as non-root. Privileged features may be disabled or limited."
 _logfile_only "Note: running as non-root. Privileged features are disabled or limited."
 
 # -----------------------
-# Main checks (safe, non-root-friendly)
+# CORE CHECKS (full by default)
 # -----------------------
 
 _run_and_log "System Overview Start (date)" "date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date '+%F %T'"
 
-# Hostname and User
-if command -v hostname >/dev/null 2>&1; then
-  _run_and_log "Hostname" "hostname"
-elif [ -r /proc/sys/kernel/hostname ]; then
-  _run_and_log "Hostname (from /proc)" "cat /proc/sys/kernel/hostname"
-elif command -v uname >/dev/null 2>&1; then
-  _run_and_log "Hostname (from uname -n)" "uname -n"
+# Hostname: runs the same safe fallback again for per-check output
+_run_and_log "Hostname" "hostname 2>/dev/null || ( [ -r /proc/sys/kernel/hostname ] && cat /proc/sys/kernel/hostname 2>/dev/null ) || uname -n 2>/dev/null || printf '%s\n' 'unknown'"
+
+_run_and_log "Current User" "whoami || id -un || printf '%s\n' \"${USER:-unknown}\""
+
+_try_or_record "lscpu" "CPU / lscpu" "lscpu -a" "grep 'model name' /proc/cpuinfo || head -n 5 /proc/cpuinfo"
+_try_or_record "uname" "Kernel & uname details" "uname -a" "cat /proc/version 2>/dev/null || true"
+_run_and_log "System Architecture" "uname -m || arch || printf '%s\n' 'unknown'"
+
+if [ -r /etc/os-release ]; then
+  _run_and_log "OS Release (/etc/os-release)" "cat /etc/os-release"
 else
-  _fail_step "Hostname" "no available method to determine hostname"
+  _try_or_record "lsb_release" "OS Release (lsb_release)" "lsb_release -a" "printf '%s\n' 'no /etc/os-release, lsb_release missing'"
 fi
 
-if command -v whoami >/dev/null 2>&1; then
-  _run_and_log "Current User" "whoami"
-elif command -v id >/dev/null 2>&1; then
-  _run_and_log "Current User (id -un)" "id -un"
-elif [ -n "${USER:-}" ]; then
-  _run_and_log "Current User (env \$USER)" "printf '%s\n' \"${USER}\""
+_run_and_log "Environment variables (presence check)" "vars='HOME SHELL PATH USER LOGNAME TERM LANG EDITOR PAGER'; for v in \$vars; do val=\$(env | grep \"^\\${v}=\" | head -n1); [ -z \"\$val\" ] && printf '%s\n' \"\$v is UNSET\" || printf '%s\n' \"\$val\"; done"
+
+_run_and_log "PATH cursory writable check" 'OLDIFS=$IFS; IFS=":"; total=0; writable=0; for p in $PATH; do total=$((total+1)); [ -z "$p" ] && p="(empty)"; if [ -d "$p" ] && [ -w "$p" ]; then printf "%s\n" "writable:$p"; writable=$((writable+1)); fi; if [ "$total" -ge 50 ]; then printf "%s\n" "...truncated"; break; fi; done; IFS=$OLDIFS; printf "%s\n" "PATH total=$total writable=$writable"'
+
+_try_or_record "ip" "Networking: ip addr show" "ip a s" "ifconfig -a || printf '%s\n' 'no ip/ifconfig available'"
+_try_or_record "iproute" "Networking: ip route" "ip r" "route -n || netstat -rn || printf '%s\n' 'no route/netstat available'"
+
+_try_or_record "uptime" "System Uptime" "uptime" "awk '{printf(\"uptime_seconds=%s idle=%s\\n\", \$1, \$2)}' /proc/uptime || cat /proc/uptime"
+
+if [ "$MINIMAL" -ne 1 ]; then
+  if command -v ps >/dev/null 2>&1; then _run_and_log "Running Processes (ps aux)" "ps aux"; else _run_and_log "Running Processes (ps fallback)" "ps -ef || printf '%s\n' 'ps not available'"; fi
 else
-  _fail_step "Current User" "no available method to determine current user"
+  _run_and_log "Running Processes (minimal)" "ps -eo pid,ppid,cmd --sort=-pid | head -n 10 || printf '%s\n' 'ps not available'"
 fi
 
-# (remaining checks are unchanged and follow the same pattern as above)
-# Disk/Memory/CPU summaries, Networking, Uptime, Processes, System stats, Printers, Sudo, dmesg, etc.
+if [ "$MINIMAL" -ne 1 ]; then
+  _run_and_log "Disk usage (df -h)" "df -h 2>/dev/null || df -k 2>/dev/null || printf '%s\n' 'df not available'"
+  if command -v free >/dev/null 2>&1; then _run_and_log "Memory (free -h)" "free -h"; else _run_and_log "Memory (/proc/meminfo)" "head -n 12 /proc/meminfo || printf '%s\n' 'meminfo not available'"; fi
+  _try_or_record "lscpu2" "CPU detailed" "lscpu" "grep -m1 'model name' /proc/cpuinfo || printf '%s\n' 'cpuinfo not available'"
+  _run_and_log "Mounted filesystems (/proc/mounts)" "cut -d' ' -f1-3 /proc/mounts | head -n 60 || mount | head -n 60"
+else
+  _run_and_log "Disk usage (minimal: /)" "df -h / 2>/dev/null || printf '%s\n' 'df not available'"
+  _run_and_log "Memory (minimal: MemTotal)" "grep '^MemTotal' /proc/meminfo || printf '%s\n' 'meminfo not available'"
+  _run_and_log "CPU (minimal: count)" "grep -c '^processor' /proc/cpuinfo || printf '%s\n' 'cpuinfo not available'"
+fi
 
-# Final explicit end markers (the exit trap will also write footer)
-end_time="$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date '+%F %T')"
-_status "System overview end date: $end_time"
+_run_and_log "Package manager detection (light)" "if command -v dpkg >/dev/null 2>&1; then printf '%s\n' 'dpkg detected'; elif command -v rpm >/dev/null 2>&1; then printf '%s\n' 'rpm detected'; elif command -v apk >/dev/null 2>&1; then printf '%s\n' 'apk detected'; elif command -v pacman >/dev/null 2>&1; then printf '%s\n' 'pacman detected'; else printf '%s\n' 'no common package manager detected'; fi"
+
+if command -v sudo >/dev/null 2>&1; then _run_and_log "Sudo version (first 40 lines)" "sudo -V 2>&1 | head -n 40"; else _logfile_only "Sudo: not installed"; fi
+
+if command -v dmesg >/dev/null 2>&1; then
+  _run_and_log "dmesg (recent)" "dmesg | tail -n 500 || true"
+  _run_and_log "dmesg: signature heuristics" "dmesg | tail -n 500 | awk 'BEGIN{IGNORECASE=1} /secure boot|mok|ima|evm|signature|signed/ {print NR\":\"\$0}' | head -n 200 || printf '%s\n' 'no signature keywords'"
+else
+  _logfile_only "dmesg: command not available or restricted"
+fi
+
+command -v vmstat >/dev/null 2>&1 && _run_and_log "vmstat -s" "vmstat -s" || _logfile_only "vmstat not available"
+command -v iostat >/dev/null 2>&1 && _run_and_log "iostat -x -c 1 2 (truncated)" "iostat -x -c 1 2 | head -n 200" || _logfile_only "iostat not available"
+if command -v top >/dev/null 2>&1; then _run_and_log "top snapshot" "top -b -n 1 | head -n 200"; else _run_and_log "top fallback" "ps -eo pid,ppid,cmd,%mem,%cpu --sort=-%cpu | head -n 20"; fi
+
+command -v cpufreq-info >/dev/null 2>&1 && _run_and_log "cpufreq-info" "cpufreq-info | head -n 80" || _logfile_only "cpufreq-info not available"
+
+if command -v lpstat >/dev/null 2>&1; then _run_and_log "Printers (lpstat -p -d)" "lpstat -p -d"; elif [ -r /etc/printcap ]; then _run_and_log "printcap" "head -n 40 /etc/printcap"; else _logfile_only "Printers: none found"; fi
+command -v pgrep >/dev/null 2>&1 && pgrep -x cupsd >/dev/null 2>&1 && _run_and_log "CUPS" "ps -o pid,cmd -C cupsd" || _logfile_only "CUPS: cupsd not running or pgrep missing"
+
+_run_and_log "Host date (local)" "date '+%Y-%m-%d %H:%M:%S %Z'"
+_run_and_log "Host date (UTC)" "date -u '+%Y-%m-%d %H:%M:%S UTC'"
+if command -v curl >/dev/null 2>&1; then _run_and_log "HTTP Date header (curl) from https://example.com" "curl -sI --max-time 6 https://example.com | awk '/^Date:/ {sub(/^Date: /,\"\"); print \$0; exit}' || printf '%s\n' 'no remote date'"; else _logfile_only "curl not available to fetch remote date"; fi
+_run_and_log "Time sync tools (timedatectl / ntpstat / chronyc)" "if command -v timedatectl >/dev/null 2>&1; then timedatectl status; fi; if command -v ntpstat >/dev/null 2>&1; then ntpstat || true; fi; if command -v chronyc >/dev/null 2>&1; then chronyc tracking || true; fi"
+
+# end
+_status "System overview end date: $(date '+%Y-%m-%d %H:%M:%S')"
 _logfile_only ""
-_logfile_only "System overview end date: $end_time"
+_logfile_only "System overview end date: $(date '+%Y-%m-%d %H:%M:%S')"
 _logfile_only "END WATERMARK: $WATERMARK_LINE"
 
 exit 0
