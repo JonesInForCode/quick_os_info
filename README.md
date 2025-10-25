@@ -18,7 +18,7 @@ Quick facts
 - Watermark/header/footer: always present to show intent, signer (if provided), and timestamps
 
 Security / ethical notice
-This script is written for safe, read-only enumeration. It is intended for authorized auditing or for initial orientation after limited-access compromise (e.g., a restricted shell). Use only where you are authorized. The header and JSON summary are designed to make the script's intent obvious to defenders when they review logs.
+This script is written for safe, read-only enumeration. It is intended for authorized auditing or for initial orientation after limited-access compromise (e.g., a restricted shell), does not execute any other commands beyond getting info and saving it to a .log file. Use only where you are authorized. The header and JSON summary are designed to make the script's intent obvious to defenders when they review logs.
 
 Usage
   ./os_info.sh [options]
@@ -58,6 +58,8 @@ Basic examples
 Flags / options
 - -c, --console
     If logfile cannot be created, force all output to console (streams full outputs).
+- --out
+    specify where to save the .log file as /path/logName.log
 - -v, --verbose
     Stream full command outputs to console (and log). Default is to keep full output in logfile only.
 - -m, --minimal
