@@ -1,4 +1,4 @@
-# os_info.sh — Quick OS audit & orientation script (POSIX sh)
+# os_info.sh — Quick OS audit & orientation script (/bin/bash)
 
 os_info.sh is a small, bash shell system information collector designed to run safely without root by default. It produces a timestamped log (by default in `/tmp`) and gives a short, clear console summary so a defender (blue team) or operator can immediately see why the script ran. It is intended as a first, non-destructive orientation/audit tool for system administrators and security researchers (pentesters, red/blue teams) to gather quick host facts before deeper work.
 
